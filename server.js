@@ -2,17 +2,15 @@
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");const Database = require("better-sqlite3");
-
+const jwt = require("jsonwebtoken");
+const Database = require("better-sqlite3");
 
 const app = express();
 const db = new Database("database.db");
 
-
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET =
-process.env.JWT_SECRET || "change-this-secret";
-
+  process.env.JWT_SECRET || "change-this-secret";
 
 app.use(cors());
 app.use(express.json());
