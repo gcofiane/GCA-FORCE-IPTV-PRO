@@ -2,18 +2,22 @@
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const Database = require("better-sqlite3");
+const jwt = require("jsonwebtoken");const Database = require("better-sqlite3");
+
 
 const app = express();
-const db = new Database("gca_force.db");
+const db = new Database("database.db");
 
-const PORT = process.env.PORT || 8080;
+
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET =
-  process.env.JWT_SECRET || "CHANGE_THIS_SECRET_IN_PRODUCTION";
+process.env.JWT_SECRET || "change-this-secret";
+
 
 app.use(cors());
 app.use(express.json());
+
+
 
 /* =========================
    PAGE ADMIN
