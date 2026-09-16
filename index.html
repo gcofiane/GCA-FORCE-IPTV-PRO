@@ -1,0 +1,9 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>GCA FORCE-IPTV PRO Admin</title>
+<style>body{font-family:Arial;background:#050b16;color:#fff;padding:30px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}.card{background:#0b1526;border:1px solid #167bd0;border-radius:12px;padding:20px}.muted{color:#8da5bf}</style></head>
+<body><h1>GCA FORCE-IPTV PRO — Administration</h1><p class="muted">Connecté au backend REST.</p><div class="grid" id="stats"></div>
+<script>
+const token=prompt("Token admin (coller le Bearer token sans 'Bearer')");
+fetch("http://localhost:8080/api/admin/overview",{headers:{Authorization:"Bearer "+token}}).then(r=>r.json()).then(x=>{
+document.getElementById("stats").innerHTML=Object.entries(x).map(([k,v])=>`<div class="card"><h2>${v}</h2><div class="muted">${k}</div></div>`).join("")
+}).catch(e=>document.getElementById("stats").innerHTML="<div class='card'>Backend inaccessible</div>");
+</script></body></html>
