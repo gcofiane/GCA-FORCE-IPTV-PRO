@@ -1,484 +1,682 @@
-
 const express = require("express");
 const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const Database = require("better-sqlite3");
+const jwt = require("jsonwebtoken");
 
 const app = express();
-const db = new Database("database.db");
+
+// ======================================================
+// CONFIGURATION
+// ======================================================
 
 const PORT = process.env.PORT || 3000;
+
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "CHANGE_ME_ADMIN_TOKEN";
+
 const JWT_SECRET =
-  process.env.JWT_SECRET || "change-this-secret";
+  process.env.JWT_SECRET || "CHANGE_ME_JWT_SECRET";
+
+// ======================================================
+// MIDDLEWARE
+// ======================================================
 
 app.use(cors());
 app.use(express.json());
 
+// ======================================================
+// BASE DE DONNÉES SQLITE
+// ======================================================
 
+const db = new Database("database.db");
 
-/* =========================
-   PAGE ADMIN
-========================= */
+db.pragma("journal_mode = WAL");
 
-app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/index.html");
-});
-
-/* =========================
-   DATABASE
-========================= */
-
+// Table des appareils
 db.exec(`
-CREATE TABLE IF NOT EXISTS users(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email TEXT UNIQUE NOT NULL,
-  password TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'user',
-  active INTEGER NOT NULL DEFAULT 1,
-  expires_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS activation_codes(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  code TEXT UNIQUE NOT NULL,
-  expires_at TEXT,
-  used INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS devices(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  device_id TEXT NOT NULL,
-  device_name TEXT,
-  platform TEXT,
-  created_at TEXT NOT NULL,
-  UNIQUE(user_id,device_id),
-  FOREIGN KEY(user_id) REFERENCES users(id)
-);
-
-CREATE TABLE IF NOT EXISTS dns_servers(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  base_url TEXT NOT NULL,
-  priority INTEGER NOT NULL DEFAULT 100,
-  active INTEGER NOT NULL DEFAULT 1
-);
+  CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT UNIQUE NOT NULL,
+    name TEXT DEFAULT '',
+    active INTEGER DEFAULT 0,
+    activation_code TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
 `);
 
-/* =========================
-   DEMO DATA
-========================= */
+// Table des codes d'activation
+db.exec(`
+  CREATE TABLE IF NOT EXISTS activation_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT UNIQUE NOT NULL,
+    active INTEGER DEFAULT 1,
+    device_id TEXT DEFAULT '',
+    expires_at DATETIME DEFAULT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
 
-try {
-  const a = db
-    .prepare("SELECT id FROM users WHERE email=?")
-    .get("admin@gcaforce.local");
+// Table DNS
+db.exec(`
+  CREATE TABLE IF NOT EXISTS dns_servers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    active INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
 
-  if (!a) {
-    db.prepare(
-      "INSERT INTO users(email,password,role,expires_at) VALUES(?,?,?,?)"
-    ).run(
-      "admin@gcaforce.local",
-      bcrypt.hashSync("ChangeMe123!", 10),
-      "admin",
-      "2099-12-31"
-    );
-  }
+// ======================================================
+// OUTILS
+// ======================================================
 
-  const u = db
-    .prepare("SELECT id FROM users WHERE email=?")
-    .get("demo@gcaforce.local");
-
-  if (!u) {
-    db.prepare(
-      "INSERT INTO users(email,password,role,expires_at) VALUES(?,?,?,?)"
-    ).run(
-      "demo@gcaforce.local",
-      bcrypt.hashSync("Demo123!", 10),
-      "user",
-      "2099-12-31"
-    );
-  }
-
-  const c = db
-    .prepare("SELECT id FROM activation_codes WHERE code=?")
-    .get("GCA-DEMO-2026");
-
-  if (!c) {
-    db.prepare(
-      "INSERT INTO activation_codes(code,expires_at) VALUES(?,?)"
-    ).run("GCA-DEMO-2026", "2099-12-31");
-  }
-
-  const d = db
-    .prepare("SELECT id FROM dns_servers LIMIT 1")
-    .get();
-
-  if (!d) {
-    db.prepare(
-      "INSERT INTO dns_servers(name,base_url,priority) VALUES(?,?,?)"
-    ).run(
-      "DNS 1",
-      "https://example-authorized-server.invalid",
-      1
-    );
-  }
-} catch (e) {
-  console.error(e);
+function generateCode() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-/* =========================
-   AUTHENTICATION
-========================= */
-
-function auth(req, res, next) {
-  try {
-    const h = req.headers.authorization || "";
-    const token = h.startsWith("Bearer ") ? h.slice(7) : "";
-
-    req.user = jwt.verify(token, JWT_SECRET);
-
-    next();
-  } catch (e) {
-    return res.status(401).json({
-      error: "unauthorized"
-    });
-  }
-}
-
-function admin(req, res, next) {
-  if (!req.user || req.user.role !== "admin") {
-    return res.status(403).json({
-      error: "admin_only"
-    });
-  }
-
-  next();
-}
-
-/* =========================
-   HEALTH
-========================= */
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    service: "GCA FORCE-IPTV PRO"
-  });
-});
-
-/* =========================
-   LOGIN
-========================= */
-
-app.post("/api/auth/login", (req, res) => {
-  const { email, password } = req.body || {};
-
-  const u = db
-    .prepare("SELECT * FROM users WHERE email=? AND active=1")
-    .get(email);
-
-  if (
-    !u ||
-    !bcrypt.compareSync(password || "", u.password)
-  ) {
-    return res.status(401).json({
-      error: "invalid_credentials"
-    });
-  }
-
-  const token = jwt.sign(
+function generateToken(deviceId) {
+  return jwt.sign(
     {
-      id: u.id,
-      email: u.email,
-      role: u.role
+      device_id: deviceId
     },
     JWT_SECRET,
     {
       expiresIn: "30d"
     }
   );
+}
 
-  res.json({
-    token,
-    user: {
-      id: u.id,
-      email: u.email,
-      role: u.role,
-      expiresAt: u.expires_at
-    }
-  });
-});
+// ======================================================
+// AUTHENTIFICATION ADMIN
+// ======================================================
 
-/* =========================
-   ACTIVATE DEVICE
-========================= */
+function adminAuth(req, res, next) {
+  const auth = req.headers.authorization;
 
-app.post("/api/activate", auth, (req, res) => {
-  const {
-    code,
-    deviceId,
-    deviceName,
-    platform
-  } = req.body || {};
-
-  const c = db
-    .prepare(
-      "SELECT * FROM activation_codes WHERE code=? AND used=0"
-    )
-    .get(code);
-
-  if (!c) {
-    return res.status(400).json({
-      error: "invalid_or_used_code"
+  if (!auth) {
+    return res.status(401).json({
+      success: false,
+      message: "Token admin manquant"
     });
   }
 
-  db.prepare(
-    "UPDATE activation_codes SET used=1 WHERE id=?"
-  ).run(c.id);
+  const parts = auth.split(" ");
 
-  db.prepare(
-    "UPDATE users SET expires_at=? WHERE id=?"
-  ).run(c.expires_at, req.user.id);
+  if (parts.length !== 2 || parts[0] !== "Bearer") {
+    return res.status(401).json({
+      success: false,
+      message: "Format du token invalide"
+    });
+  }
 
-  db.prepare(
-    "INSERT OR IGNORE INTO devices(user_id,device_id,device_name,platform,created_at) VALUES(?,?,?,?,?)"
-  ).run(
-    req.user.id,
-    deviceId,
-    deviceName,
-    platform,
-    new Date().toISOString()
-  );
+  const token = parts[1];
 
+  if (token !== ADMIN_TOKEN) {
+    return res.status(403).json({
+      success: false,
+      message: "Token admin incorrect"
+    });
+  }
+
+  next();
+}
+
+// ======================================================
+// AUTHENTIFICATION APPAREIL
+// ======================================================
+
+function deviceAuth(req, res, next) {
+  const auth = req.headers.authorization;
+
+  if (!auth) {
+    return res.status(401).json({
+      success: false,
+      message: "Token appareil manquant"
+    });
+  }
+
+  const parts = auth.split(" ");
+
+  if (parts.length !== 2 || parts[0] !== "Bearer") {
+    return res.status(401).json({
+      success: false,
+      message: "Format du token invalide"
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(parts[1], JWT_SECRET);
+
+    const device = db
+      .prepare(
+        "SELECT * FROM devices WHERE device_id = ? AND active = 1"
+      )
+      .get(decoded.device_id);
+
+    if (!device) {
+      return res.status(403).json({
+        success: false,
+        message: "Appareil non autorisé"
+      });
+    }
+
+    req.device = device;
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      message: "Token appareil invalide ou expiré"
+    });
+  }
+}
+
+// ======================================================
+// PAGE PRINCIPALE
+// ======================================================
+
+app.get("/", (req, res) => {
   res.json({
-    ok: true,
-    expiresAt: c.expires_at
+    success: true,
+    name: "GCA FORCE-IPTV PRO",
+    message: "Backend REST opérationnel",
+    version: "1.0.0"
   });
 });
 
-/* =========================
-   DNS
-========================= */
+// ======================================================
+// HEALTH CHECK
+// ======================================================
 
-app.get("/api/dns", auth, (req, res) => {
-  const rows = db
+app.get("/api/health", (req, res) => {
+  res.json({
+    success: true,
+    status: "online",
+    service: "GCA FORCE-IPTV PRO",
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ======================================================
+// CONNEXION ADMIN
+// ======================================================
+
+app.post("/api/admin/login", (req, res) => {
+  const { token } = req.body;
+
+  if (!token) {
+    return res.status(400).json({
+      success: false,
+      message: "Token manquant"
+    });
+  }
+
+  if (token !== ADMIN_TOKEN) {
+    return res.status(403).json({
+      success: false,
+      message: "Token admin incorrect"
+    });
+  }
+
+  res.json({
+    success: true,
+    message: "Connexion administrateur réussie"
+  });
+});
+
+// ======================================================
+// INFORMATIONS ADMIN
+// ======================================================
+
+app.get("/api/admin", adminAuth, (req, res) => {
+  const devices = db
+    .prepare("SELECT * FROM devices ORDER BY id DESC")
+    .all();
+
+  const codes = db
+    .prepare("SELECT * FROM activation_codes ORDER BY id DESC")
+    .all();
+
+  const dns = db
+    .prepare("SELECT * FROM dns_servers ORDER BY id DESC")
+    .all();
+
+  res.json({
+    success: true,
+    service: "GCA FORCE-IPTV PRO",
+    devices,
+    activation_codes: codes,
+    dns_servers: dns
+  });
+});
+
+// ======================================================
+// APPAREILS - LISTE
+// ======================================================
+
+app.get("/api/admin/devices", adminAuth, (req, res) => {
+  const devices = db
+    .prepare("SELECT * FROM devices ORDER BY id DESC")
+    .all();
+
+  res.json({
+    success: true,
+    devices
+  });
+});
+
+// ======================================================
+// AJOUTER UN APPAREIL
+// ======================================================
+
+app.post("/api/admin/devices", adminAuth, (req, res) => {
+  const {
+    device_id,
+    name = "",
+    active = 0
+  } = req.body;
+
+  if (!device_id) {
+    return res.status(400).json({
+      success: false,
+      message: "device_id obligatoire"
+    });
+  }
+
+  try {
+    const result = db
+      .prepare(`
+        INSERT INTO devices
+        (device_id, name, active)
+        VALUES (?, ?, ?)
+      `)
+      .run(
+        device_id,
+        name,
+        active ? 1 : 0
+      );
+
+    res.json({
+      success: true,
+      message: "Appareil ajouté",
+      id: result.lastInsertRowid
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: "Cet appareil existe déjà"
+    });
+  }
+});
+
+// ======================================================
+// ACTIVER / DÉSACTIVER UN APPAREIL
+// ======================================================
+
+app.patch("/api/admin/devices/:id", adminAuth, (req, res) => {
+  const id = req.params.id;
+  const { active } = req.body;
+
+  const result = db
+    .prepare(`
+      UPDATE devices
+      SET active = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `)
+    .run(
+      active ? 1 : 0,
+      id
+    );
+
+  if (result.changes === 0) {
+    return res.status(404).json({
+      success: false,
+      message: "Appareil introuvable"
+    });
+  }
+
+  res.json({
+    success: true,
+    message: active
+      ? "Appareil activé"
+      : "Appareil désactivé"
+  });
+});
+
+// ======================================================
+// SUPPRIMER UN APPAREIL
+// ======================================================
+
+app.delete("/api/admin/devices/:id", adminAuth, (req, res) => {
+  const result = db
+    .prepare("DELETE FROM devices WHERE id = ?")
+    .run(req.params.id);
+
+  if (result.changes === 0) {
+    return res.status(404).json({
+      success: false,
+      message: "Appareil introuvable"
+    });
+  }
+
+  res.json({
+    success: true,
+    message: "Appareil supprimé"
+  });
+});
+
+// ======================================================
+// CODES D'ACTIVATION - LISTE
+// ======================================================
+
+app.get("/api/admin/codes", adminAuth, (req, res) => {
+  const codes = db
     .prepare(
-      "SELECT id,name,base_url,priority,active FROM dns_servers WHERE active=1 ORDER BY priority"
+      "SELECT * FROM activation_codes ORDER BY id DESC"
     )
     .all();
 
   res.json({
-    servers: rows
+    success: true,
+    codes
   });
 });
 
-/* =========================
-   DEVICES
-========================= */
+// ======================================================
+// CRÉER UN CODE D'ACTIVATION
+// ======================================================
 
-app.post("/api/devices/register", auth, (req, res) => {
-  const {
-    deviceId,
-    deviceName,
-    platform
-  } = req.body || {};
+app.post("/api/admin/codes", adminAuth, (req, res) => {
+  let code = req.body.code;
 
-  if (!deviceId) {
-    return res.status(400).json({
-      error: "device_id_required"
-    });
+  if (!code) {
+    code = generateCode();
   }
 
-  const count = db
-    .prepare(
-      "SELECT COUNT(*) n FROM devices WHERE user_id=?"
-    )
-    .get(req.user.id).n;
+  code = code.toUpperCase();
 
-  const exists = db
-    .prepare(
-      "SELECT id FROM devices WHERE user_id=? AND device_id=?"
-    )
-    .get(req.user.id, deviceId);
+  const expiresAt =
+    req.body.expires_at || null;
 
-  if (!exists && count >= 5) {
-    return res.status(409).json({
-      error: "device_limit_reached",
-      limit: 5
-    });
-  }
-
-  db.prepare(
-    "INSERT OR IGNORE INTO devices(user_id,device_id,device_name,platform,created_at) VALUES(?,?,?,?,?)"
-  ).run(
-    req.user.id,
-    deviceId,
-    deviceName,
-    platform,
-    new Date().toISOString()
-  );
-
-  res.json({
-    ok: true
-  });
-});
-
-app.get("/api/devices", auth, (req, res) => {
-  res.json({
-    devices: db
-      .prepare(
-        "SELECT id,device_id,device_name,platform,created_at FROM devices WHERE user_id=? ORDER BY id DESC"
-      )
-      .all(req.user.id)
-  });
-});
-
-/* =========================
-   ADMIN OVERVIEW
-========================= */
-
-app.get(
-  "/api/admin/overview",
-  auth,
-  admin,
-  (req, res) => {
-    res.json({
-      users: db
-        .prepare(
-          "SELECT COUNT(*) n FROM users WHERE role='user'"
-        )
-        .get().n,
-
-      devices: db
-        .prepare(
-          "SELECT COUNT(*) n FROM devices"
-        )
-        .get().n,
-
-      codes: db
-        .prepare(
-          "SELECT COUNT(*) n FROM activation_codes WHERE used=0"
-        )
-        .get().n,
-
-      dns: db
-        .prepare(
-          "SELECT COUNT(*) n FROM dns_servers WHERE active=1"
-        )
-        .get().n
-    });
-  }
-);
-
-/* =========================
-   ADMIN USERS
-========================= */
-
-app.get(
-  "/api/admin/users",
-  auth,
-  admin,
-  (req, res) => {
-    res.json({
-      users: db
-        .prepare(
-          "SELECT id,email,role,active,expires_at FROM users ORDER BY id DESC"
-        )
-        .all()
-    });
-  }
-);
-
-/* =========================
-   ADMIN DNS
-========================= */
-
-app.get(
-  "/api/admin/dns",
-  auth,
-  admin,
-  (req, res) => {
-    res.json({
-      servers: db
-        .prepare(
-          "SELECT * FROM dns_servers ORDER BY priority"
-        )
-        .all()
-    });
-  }
-);
-
-app.post(
-  "/api/admin/dns",
-  auth,
-  admin,
-  (req, res) => {
-    const {
-      name,
-      baseUrl,
-      priority = 100
-    } = req.body || {};
-
-    if (!name || !baseUrl) {
-      return res.status(400).json({
-        error: "name_and_base_url_required"
-      });
-    }
-
-    const info = db
-      .prepare(
-        "INSERT INTO dns_servers(name,base_url,priority) VALUES(?,?,?)"
-      )
-      .run(name, baseUrl, priority);
+  try {
+    const result = db
+      .prepare(`
+        INSERT INTO activation_codes
+        (code, active, expires_at)
+        VALUES (?, 1, ?)
+      `)
+      .run(
+        code,
+        expiresAt
+      );
 
     res.json({
-      id: info.lastInsertRowid
-    });
-  }
-);
-
-/* =========================
-   ADMIN ACTIVATION CODES
-========================= */
-
-app.post(
-  "/api/admin/codes",
-  auth,
-  admin,
-  (req, res) => {
-    const {
+      success: true,
+      message: "Code créé",
       code,
-      expiresAt
-    } = req.body || {};
+      id: result.lastInsertRowid
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: "Ce code existe déjà"
+    });
+  }
+});
 
-    if (!code) {
-      return res.status(400).json({
-        error: "code_required"
-      });
-    }
+// ======================================================
+// ACTIVER / DÉSACTIVER UN CODE
+// ======================================================
 
-    db.prepare(
-      "INSERT INTO activation_codes(code,expires_at) VALUES(?,?)"
-    ).run(
-      code,
-      expiresAt || "2099-12-31"
+app.patch("/api/admin/codes/:id", adminAuth, (req, res) => {
+  const { active } = req.body;
+
+  const result = db
+    .prepare(`
+      UPDATE activation_codes
+      SET active = ?
+      WHERE id = ?
+    `)
+    .run(
+      active ? 1 : 0,
+      req.params.id
     );
 
-    res.json({
-      ok: true
+  if (result.changes === 0) {
+    return res.status(404).json({
+      success: false,
+      message: "Code introuvable"
     });
   }
-);
 
-/* =========================
-   START SERVER
-========================= */
+  res.json({
+    success: true,
+    message: active
+      ? "Code activé"
+      : "Code désactivé"
+  });
+});
 
-app.listen(PORT, () =>
+// ======================================================
+// SUPPRIMER UN CODE
+// ======================================================
+
+app.delete("/api/admin/codes/:id", adminAuth, (req, res) => {
+  const result = db
+    .prepare(
+      "DELETE FROM activation_codes WHERE id = ?"
+    )
+    .run(req.params.id);
+
+  if (result.changes === 0) {
+    return res.status(404).json({
+      success: false,
+      message: "Code introuvable"
+    });
+  }
+
+  res.json({
+    success: true,
+    message: "Code supprimé"
+  });
+});
+
+// ======================================================
+// ACTIVATION D'UN APPAREIL
+// ======================================================
+
+app.post("/api/auth/activate", (req, res) => {
+  const {
+    device_id,
+    code,
+    name = ""
+  } = req.body;
+
+  if (!device_id || !code) {
+    return res.status(400).json({
+      success: false,
+      message: "device_id et code sont obligatoires"
+    });
+  }
+
+  const activationCode = db
+    .prepare(`
+      SELECT *
+      FROM activation_codes
+      WHERE code = ?
+      AND active = 1
+    `)
+    .get(code.toUpperCase());
+
+  if (!activationCode) {
+    return res.status(403).json({
+      success: false,
+      message: "Code d'activation invalide"
+    });
+  }
+
+  // Vérification de l'expiration
+  if (
+    activationCode.expires_at &&
+    new Date(activationCode.expires_at) < new Date()
+  ) {
+    return res.status(403).json({
+      success: false,
+      message: "Code d'activation expiré"
+    });
+  }
+
+  // Vérifier si l'appareil existe
+  let device = db
+    .prepare(
+      "SELECT * FROM devices WHERE device_id = ?"
+    )
+    .get(device_id);
+
+  if (device) {
+    db.prepare(`
+      UPDATE devices
+      SET active = 1,
+          activation_code = ?,
+          name = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE device_id = ?
+    `).run(
+      code.toUpperCase(),
+      name,
+      device_id
+    );
+  } else {
+    db.prepare(`
+      INSERT INTO devices
+      (device_id, name, active, activation_code)
+      VALUES (?, ?, 1, ?)
+    `).run(
+      device_id,
+      name,
+      code.toUpperCase()
+    );
+  }
+
+  // Marquer le code comme utilisé
+  db.prepare(`
+    UPDATE activation_codes
+    SET active = 0,
+        device_id = ?
+    WHERE id = ?
+  `).run(
+    device_id,
+    activationCode.id
+  );
+
+  const token = generateToken(device_id);
+
+  res.json({
+    success: true,
+    message: "Appareil activé avec succès",
+    device_id,
+    token
+  });
+});
+
+// ======================================================
+// INFORMATIONS DE L'APPAREIL CONNECTÉ
+// ======================================================
+
+app.get("/api/device/me", deviceAuth, (req, res) => {
+  res.json({
+    success: true,
+    device: req.device
+  });
+});
+
+// ======================================================
+// DNS - LISTE PUBLIQUE
+// ======================================================
+
+app.get("/api/dns", (req, res) => {
+  const dns = db
+    .prepare(`
+      SELECT id, name, url
+      FROM dns_servers
+      WHERE active = 1
+      ORDER BY id ASC
+    `)
+    .all();
+
+  res.json({
+    success: true,
+    dns
+  });
+});
+
+// ======================================================
+// DNS - ADMIN
+// ======================================================
+
+app.post("/api/admin/dns", adminAuth, (req, res) => {
+  const {
+    name,
+    url
+  } = req.body;
+
+  if (!name || !url) {
+    return res.status(400).json({
+      success: false,
+      message: "name et url sont obligatoires"
+    });
+  }
+
+  const result = db
+    .prepare(`
+      INSERT INTO dns_servers
+      (name, url, active)
+      VALUES (?, ?, 1)
+    `)
+    .run(
+      name,
+      url
+    );
+
+  res.json({
+    success: true,
+    message: "DNS ajouté",
+    id: result.lastInsertRowid
+  });
+});
+
+// ======================================================
+// ERREUR 404
+// ======================================================
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "Route introuvable",
+    path: req.path
+  });
+});
+
+// ======================================================
+// GESTION DES ERREURS
+// ======================================================
+
+app.use((error, req, res, next) => {
+  console.error(error);
+
+  res.status(500).json({
+    success: false,
+    message: "Erreur interne du serveur"
+  });
+});
+
+// ======================================================
+// DÉMARRAGE
+// ======================================================
+
+app.listen(PORT, () => {
   console.log(
-    `GCA FORCE-IPTV PRO API listening on ${PORT}`
-  )
-);
+    GCA FORCE-IPTV PRO API listening on port ${PORT}
+  );
+});
